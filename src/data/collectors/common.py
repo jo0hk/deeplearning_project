@@ -20,7 +20,7 @@ def load_env(path: Path | None = None) -> None:
     path = path or PROJECT_ROOT / ".env"
     if not path.exists():
         return
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text(encoding="utf-8-sig").splitlines():  # 메모장 BOM 대비
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -61,8 +61,11 @@ def get_with_retry(
     sleep: float = 1.0,
     encoding: str | None = None,
 ) -> str:
-    """GET 요청을 재시도하며 본문 텍스트를 돌려준다."""
-    last_err: Exception | None = None
+    """GET 요청을 재시도하며 본문 텍스트를 돌려준다.
+
+    실패 메시지에는 API 키를 가린 내용만 남긴다 (requests 오류 메시지에는 키가 든 전체 URL이 들어간다).
+    """
+    last_msg = ""
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(url, params=params, timeout=timeout)
@@ -71,10 +74,26 @@ def get_with_retry(
                 resp.encoding = encoding
             return resp.text
         except requests.RequestException as err:
-            last_err = err
+            body = err.response.text[:300].strip() if err.response is not None else ""
+            last_msg = redact(f"{type(err).__name__}: {err}" + (f"\n응답 본문: {body}" if body else ""), params)
+            status = err.response.status_code if err.response is not None else None
+            if status is not None and 400 <= status < 500 and status != 429:
+                break  # 키·권한 문제 등 클라이언트 오류는 재시도해도 같다
             if attempt < retries:
                 time.sleep(sleep * attempt)
-    raise RuntimeError(f"요청 실패 ({retries}회): {url}") from last_err
+    raise RuntimeError(f"요청 실패: {url} — {last_msg}") from None
+
+
+SECRET_PARAM_NAMES = {"service", "servicekey", "authkey", "key", "apikey"}
+
+
+def redact(text: str, params: dict | None) -> str:
+    """text 안에 들어간 키 값을 '***'로 바꾼다."""
+    for name, value in (params or {}).items():
+        if name.lower() in SECRET_PARAM_NAMES and value:
+            text = text.replace(str(value), "***")
+            text = text.replace(requests.utils.quote(str(value), safe=""), "***")
+    return text
 
 
 def save_json(obj, path: Path) -> Path:

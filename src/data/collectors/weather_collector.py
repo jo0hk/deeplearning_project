@@ -10,12 +10,16 @@
   python -m src.data.collectors.weather_collector --start 2025-11-01 --end 2026-10-31
   python -m src.data.collectors.weather_collector --start 2025-11-01 --end 2026-10-31 --only asos
 
-확인 필요 (API허브 문서·실제 응답을 보고 맞출 것)
-  - 두 엔드포인트의 URL·파라미터 이름 (ASOS_URL, WARNING_URL)
-  - 한 번에 조회 가능한 최대 기간: 31일로 가정 (MAX_DAYS)
-  - 결측값 표기: -9, -9.0, -99, -99.0 으로 가정. 강수량(RN)의 -9가 '결측'인지 '무강수'인지는
-    전처리 단계에서 실제 비 온 날과 대조해 정한다. 여기서는 None으로만 바꾼다.
-  - 특보 지역 필터(reg): 우선 전국(0)으로 받고, 서울 구역 코드는 응답을 보고 거른다.
+2026-08 실제 응답으로 확인한 것
+  - ASOS: 46열, 열 순서는 ASOS_COLUMNS와 같다. 한 번에 최대 31일 조회 (API허브 문서).
+  - ASOS 강수량(RN): -9(→None)인 시간은 모두 IR=3(무강수 또는 결측), 값이 있는 시간은 IR=1/4.
+    즉 RN=None + IR=3 은 대부분 '비 안 옴'이다. 0으로 채울지는 전처리 단계에서 정한다.
+  - 특보: 쉼표 구분 CSV, 줄 끝에 '=' 열이 붙는다. 열: WARNING_COLUMNS.
+    응답에는 구역 이름(REG_NAME)이 없고 코드(REG_ID)만 온다.
+
+확인 필요
+  - 서울 특보구역 코드: 8월 자료에서 L1100100~L1100400 4개가 보여 서울 4개 권역으로 추정했다
+    (SEOUL_REG_IDS). 특보구역 API(wrn_reg.php, 별도 활용신청 필요)로 이름을 대조해 확정할 것.
 """
 
 from __future__ import annotations
@@ -49,6 +53,16 @@ ASOS_COLUMNS = [
     "WH", "BF", "IR", "IX",
 ]
 MISSING = {"-9", "-9.0", "-99", "-99.0", "-999", "-999.0"}
+
+# wrn_met_data 응답 열 (help=1 응답의 헤더 설명 기준)
+WARNING_COLUMNS = ["TM_FC", "TM_EF", "TM_IN", "STN", "REG_ID", "WRN", "LVL", "CMD", "GRD", "CNT", "RPT"]
+WRN_NAMES = {
+    "W": "강풍", "R": "호우", "C": "한파", "D": "건조", "O": "폭풍해일", "N": "지진해일",
+    "V": "풍랑", "T": "태풍", "S": "대설", "Y": "황사", "H": "폭염", "F": "안개", "K": "열대야",
+}
+LVL_NAMES = {"1": "예비특보", "2": "주의보", "3": "경보", "4": "중대경보"}
+CMD_NAMES = {"1": "발표", "2": "대치", "3": "해제", "4": "대치해제", "5": "연장", "6": "변경", "7": "변경해제"}
+SEOUL_REG_IDS = {"L1100100", "L1100200", "L1100300", "L1100400"}  # 추정 — 모듈 설명 '확인 필요' 참고
 
 
 # ---------------------------------------------------------------------------
@@ -114,29 +128,31 @@ def parse_asos(text: str) -> list[dict]:
     return rows
 
 
-def parse_generic_table(text: str) -> list[dict]:
-    """헤더 줄('#' 시작)의 열 이름으로 데이터 줄을 dict로 바꾼다.
+def _kma_time(tm: str) -> str:
+    """'202608011000' → '2026-08-01 10:00'"""
+    return f"{tm[0:4]}-{tm[4:6]}-{tm[6:8]} {tm[8:10]}:{tm[10:12]}"
 
-    특보 응답 형식을 아직 확인하지 못해서 쓰는 범용 파서다. 헤더와 열 개수가 다른 줄은
-    {'raw': 원문}으로 남겨 정보를 잃지 않게 한다. 형식을 확인하면 전용 파서로 바꿀 것.
+
+def parse_warnings(text: str) -> list[dict]:
+    """wrn_met_data 응답(쉼표 CSV, 줄 끝 '=') → 특보 1건당 dict 1개.
+
+    코드값 옆에 한글 이름(wrn_name, lvl_name, cmd_name)과 서울 여부(is_seoul, 추정)를 붙인다.
     """
-    lines = _data_lines(text)
-    if not lines:
-        return []
-    n = len(lines[0].split())
-    header = None
-    for ln in text.splitlines():
-        if ln.lstrip().startswith("#"):
-            toks = ln.lstrip("#").strip().split()
-            if len(toks) == n and not all(set(t) <= set("-=") for t in toks):
-                header = _dedupe(toks)
     rows = []
-    for ln in lines:
-        toks = ln.split()
-        if header and len(toks) == len(header):
-            rows.append({h.lower(): t for h, t in zip(header, toks)})
-        else:
-            rows.append({"raw": ln})
+    for ln in _data_lines(text):
+        fields = [f.strip() for f in ln.split(",")]
+        if fields and fields[-1] == "=":
+            fields = fields[:-1]
+        if len(fields) != len(WARNING_COLUMNS):
+            raise ValueError(f"특보 열 개수가 맞지 않습니다 ({len(fields)}개): {ln[:120]}")
+        rec = {c.lower(): v for c, v in zip(WARNING_COLUMNS, fields)}
+        for k in ("tm_fc", "tm_ef", "tm_in"):
+            rec[k] = _kma_time(rec[k])
+        rec["wrn_name"] = WRN_NAMES.get(rec["wrn"])
+        rec["lvl_name"] = LVL_NAMES.get(rec["lvl"])
+        rec["cmd_name"] = CMD_NAMES.get(rec["cmd"])
+        rec["is_seoul"] = rec["reg_id"] in SEOUL_REG_IDS
+        rows.append(rec)
     return rows
 
 
@@ -172,14 +188,15 @@ def collect_warnings(key: str, start: date, end: date, reg: str = "0") -> list[d
                 "wrn": "A",  # 전체 특보 종류
                 "reg": reg,
                 "tmfc1": _tm(c_start),
-                "tmfc2": _tm(c_end, True),
+                "tmfc2": c_end.strftime("%Y%m%d") + "2359",  # 발표시각 기준이라 23:59까지 포함
                 "disp": 0,
-                "help": 1,  # 헤더 설명 포함 — 형식 확인용
+                "help": 1,  # 열 설명 포함 (원문 확인용)
                 "authKey": key,
             },
         )
         save_text(text, OUT_DIR / "warnings_raw" / f"wrn_{c_start:%Y%m%d}_{c_end:%Y%m%d}.txt")
-        part = parse_generic_table(text)
+        check_error(text)
+        part = parse_warnings(text)
         rows.extend(part)
         print(f"  특보 {c_start}~{c_end}: {len(part)}행")
     return rows
@@ -207,10 +224,8 @@ def main() -> None:
         print(f"[특보] {start} ~ {end}")
         rows = collect_warnings(key, start, end)
         out = save_json(rows, OUT_DIR / f"warnings_{tag}.json")
-        raw_only = sum(1 for r in rows if "raw" in r)
-        print(f"완료: {len(rows)}행 → {out}")
-        if raw_only:
-            print(f"  헤더와 맞지 않아 원문으로 남긴 줄: {raw_only}개 — warnings_raw/ 를 보고 파서를 맞추세요.")
+        seoul = sum(1 for r in rows if r["is_seoul"])
+        print(f"완료: {len(rows)}행 (서울 추정 {seoul}행) → {out}")
 
 
 if __name__ == "__main__":
