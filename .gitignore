@@ -1,0 +1,15 @@
+# API 키
+.env
+
+# 원본 수집 데이터 (개발 계획서: git 제외)
+data/raw/
+
+# 모델 체크포인트
+checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/

@@ -1,0 +1,24 @@
+# 데이터
+pandas>=2.0
+pyarrow
+geopy
+requests
+xmltodict
+
+# 모델
+torch>=2.0
+transformers>=4.35
+scikit-learn
+
+# 백엔드
+fastapi
+uvicorn
+apscheduler
+pydantic
+sqlalchemy
+
+# 개발
+jupyter
+matplotlib
+seaborn
+tqdm
